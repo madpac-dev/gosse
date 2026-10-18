@@ -57,7 +57,7 @@ func connect(t *testing.T, srv *httptest.Server, lastID string, topics ...string
 		t.Fatal(err)
 	}
 	c := &client{resp: resp, events: make(chan ssetest.Event, 100), done: make(chan struct{}), cancel: cancel}
-	t.Cleanup(func() { cancel(); resp.Body.Close() })
+	t.Cleanup(func() { cancel(); _ = resp.Body.Close() })
 	if resp.StatusCode != http.StatusOK {
 		close(c.done)
 		return c
@@ -333,7 +333,7 @@ func TestHeartbeat(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	br := bufio.NewReader(resp.Body)
 	for i := 0; i < 2; i++ {
 		line, err := br.ReadString('\n')
@@ -415,21 +415,40 @@ func TestServeThroughMiddlewareWrapper(t *testing.T) {
 }
 
 // blockingWriter is a flushable ResponseWriter whose Write blocks until gate
-// is closed.
+// is closed. Each call to Write sends on entered (if there is room) before
+// blocking, so tests can wait until Serve is stuck in a write.
 type blockingWriter struct {
-	h    http.Header
-	gate chan struct{}
+	h       http.Header
+	gate    chan struct{}
+	entered chan struct{}
 }
 
 func newBlockingWriter() *blockingWriter {
-	return &blockingWriter{h: http.Header{}, gate: make(chan struct{})}
+	return &blockingWriter{h: http.Header{}, gate: make(chan struct{}), entered: make(chan struct{}, 1)}
 }
-func (w *blockingWriter) Header() http.Header         { return w.h }
-func (w *blockingWriter) WriteHeader(int)             {}
-func (w *blockingWriter) Write(p []byte) (int, error) { <-w.gate; return len(p), nil }
-func (w *blockingWriter) Flush()                      {}
+func (w *blockingWriter) Header() http.Header { return w.h }
+func (w *blockingWriter) WriteHeader(int)     {}
+func (w *blockingWriter) Write(p []byte) (int, error) {
+	select {
+	case w.entered <- struct{}{}:
+	default:
+	}
+	<-w.gate
+	return len(p), nil
+}
+func (w *blockingWriter) Flush() {}
 
-func serveAsync(b *Broker, w http.ResponseWriter, ctx context.Context, topics ...string) chan struct{} {
+// waitEntered waits until Serve is blocked inside w.Write.
+func (w *blockingWriter) waitEntered(t *testing.T) {
+	t.Helper()
+	select {
+	case <-w.entered:
+	case <-time.After(testTimeout):
+		t.Fatal("Write was not called")
+	}
+}
+
+func serveAsync(ctx context.Context, b *Broker, w http.ResponseWriter, topics ...string) chan struct{} {
 	done := make(chan struct{})
 	r := httptest.NewRequest(http.MethodGet, "/", nil).WithContext(ctx)
 	go func() {
@@ -445,14 +464,16 @@ func TestSlowConsumerDisconnected(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(lockedWriter{&mu, &logs}, nil))
 	b := NewBroker(WithBufferSize(1), WithHeartbeat(0), WithLogger(logger))
 	w := newBlockingWriter()
-	done := serveAsync(b, w, context.Background(), "a")
+	done := serveAsync(context.Background(), b, w, "a")
 	waitFor(t, func() bool { return b.subscriberCount() == 1 })
 
-	// One event may be in flight (blocked in Write) and one buffered; the
-	// third overflows.
-	for i := 0; i < 3; i++ {
-		publish(t, b, Event{}, "a")
-	}
+	// The first event is taken by Serve, which then blocks in Write. Only
+	// after that is the buffer state deterministic: the second event fills
+	// the buffer and the third overflows it.
+	publish(t, b, Event{}, "a")
+	w.waitEntered(t)
+	publish(t, b, Event{}, "a")
+	publish(t, b, Event{}, "a")
 	if n := b.subscriberCount(); n != 0 {
 		t.Fatalf("subscriberCount = %d, want 0 after overflow", n)
 	}
@@ -526,10 +547,10 @@ func TestShutdown(t *testing.T) {
 func TestShutdownTimeout(t *testing.T) {
 	b := NewBroker(WithHeartbeat(0))
 	w := newBlockingWriter()
-	done := serveAsync(b, w, context.Background(), "a")
+	done := serveAsync(context.Background(), b, w, "a")
 	waitFor(t, func() bool { return b.subscriberCount() == 1 })
 	publish(t, b, Event{}, "a")
-	time.Sleep(10 * time.Millisecond) // let Serve block in Write
+	w.waitEntered(t) // Serve is now blocked in Write
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()

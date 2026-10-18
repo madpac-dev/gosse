@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"fmt"
-	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -17,7 +16,7 @@ import (
 // and authorization, and every change is published as a JSON event.
 func Example() {
 	b := gosse.NewBroker()
-	defer b.Shutdown(context.Background())
+	defer func() { _ = b.Shutdown(context.Background()) }()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /lists/{id}/events", func(w http.ResponseWriter, r *http.Request) {
@@ -32,16 +31,16 @@ func Example() {
 	// A client (normally a browser's EventSource) subscribes to list 42.
 	resp, err := http.Get(srv.URL + "/lists/42/events")
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// The app saves an item and notifies everyone viewing the list.
 	type Item struct {
 		Name string `json:"name"`
 	}
 	if err := b.PublishJSON("list:42", "item-added", Item{Name: "milk"}); err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
 
 	// Print the event as it appears on the wire (the ID line is omitted
@@ -59,7 +58,7 @@ func Example() {
 
 func ExampleBroker_Publish() {
 	b := gosse.NewBroker()
-	defer b.Shutdown(context.Background())
+	defer func() { _ = b.Shutdown(context.Background()) }()
 
 	// Publish a multi-line, typed event to two topics. Clients subscribed
 	// to both receive it once.

@@ -60,7 +60,7 @@ func main() {
 	db := &store{lists: map[string][]Item{}}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /lists/{id}", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /lists/{id}", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write(indexHTML)
 	})
