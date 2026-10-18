@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Shopping list</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 30rem; margin: 2rem auto; }
+    #status { font-size: .8rem; color: #888; }
+  </style>
+</head>
+<body>
+  <h1 id="title">Shopping list</h1>
+  <p id="status">connecting…</p>
+  <form id="add">
+    <input name="name" placeholder="Add an item" autocomplete="off" required>
+    <button>Add</button>
+  </form>
+  <ul id="items"></ul>
+  <script>
+    const base = location.pathname.replace(/\/$/, "");
+    const list = document.getElementById("items");
+    const status = document.getElementById("status");
+    document.getElementById("title").textContent = decodeURIComponent(base.split("/").pop());
+
+    function show(item) {
+      const li = document.createElement("li");
+      li.textContent = item.name;
+      list.appendChild(li);
+    }
+
+    // Subscribe first, then load the current items. Reconnection and
+    // catching up on missed events are handled by EventSource + gosse.
+    const es = new EventSource(base + "/events");
+    es.addEventListener("item-added", (e) => show(JSON.parse(e.data)));
+    es.onopen = () => (status.textContent = "live");
+    es.onerror = () => (status.textContent = "reconnecting…");
+
+    fetch(base + "/items").then((r) => r.json()).then((items) => items.forEach(show));
+
+    document.getElementById("add").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const input = e.target.elements.name;
+      await fetch(base + "/items", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: input.value }),
+      });
+      input.value = "";
+    });
+  </script>
+</body>
+</html>
